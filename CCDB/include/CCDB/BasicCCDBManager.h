@@ -23,9 +23,11 @@
 #include <string>
 #include <chrono>
 #include <map>
+#include <string_view>
 #include <unordered_map>
 #include <memory>
 #include <cstdlib>
+#include <vector>
 
 class TGeoManager; // we need to forward-declare those classes which should not be cleaned up
 
@@ -57,6 +59,7 @@ class CCDBManagerInstance
     int queries = 0;
     int fetches = 0;
     int failures = 0;
+    std::map<std::string, std::string> cacheOfHeaders;
     bool isValid(long ts) { return ts < endvalidity && ts >= startvalidity; }
     bool isCacheValid(long ts)
     {
@@ -70,6 +73,7 @@ class CCDBManagerInstance
       uuid = "";
       startvalidity = 0;
       endvalidity = -1;
+      cacheOfHeaders.clear();
     }
   };
 
@@ -98,9 +102,9 @@ class CCDBManagerInstance
   /// query timestamp
   long getTimestamp() const { return mTimestamp; }
 
-  /// retrieve an object of type T from CCDB as stored under path and timestamp
+  /// retrieve an object of type T from CCDB as stored under path and timestamp. Optional to get the headers. Can give a filter of headers to be saved in cache and returned (if present)
   template <typename T>
-  T* getForTimeStamp(std::string const& path, long timestamp);
+  T* getForTimeStamp(std::string const& path, long timestamp, std::map<std::string, std::string>* headers = nullptr, std::vector<std::string_view> headerFilter = {});
 
   /// retrieve an object of type T from CCDB as stored under path and using the timestamp in the middle of the run
   template <typename T>
@@ -112,10 +116,7 @@ class CCDBManagerInstance
   {
     // TODO: add some error info/handling when failing
     mMetaData = metaData;
-    auto obj = getForTimeStamp<T>(path, timestamp);
-    if (headers) {
-      *headers = mHeaders;
-    }
+    auto obj = getForTimeStamp<T>(path, timestamp, headers);
     return obj;
   }
 
@@ -235,7 +236,7 @@ class CCDBManagerInstance
 };
 
 template <typename T>
-T* CCDBManagerInstance::getForTimeStamp(std::string const& path, long timestamp)
+T* CCDBManagerInstance::getForTimeStamp(std::string const& path, long timestamp, std::map<std::string, std::string>* headers, std::vector<std::string_view> headerFilter)
 {
   mHeaders.clear(); // we clear at the beginning; to allow to retrieve the header information in a subsequent call
   T* ptr = nullptr;
@@ -258,15 +259,45 @@ T* CCDBManagerInstance::getForTimeStamp(std::string const& path, long timestamp)
         mFetchedSize += s;
       }
     }
+    if (!headerFilter.empty()) {
+      LOGP(warn, "Header filter ignored when caching is disabled, giving back all headers");
+    }
+    if (headers) {
+      *headers = mHeaders;
+    }
   } else {
     auto& cached = mCache[path];
     cached.queries++;
     if ((!isOnline() && cached.isCacheValid(timestamp)) || (mCheckObjValidityEnabled && cached.isValid(timestamp))) {
+      // Give back the cached/saved headers
+      if (headers) {
+        *headers = cached.cacheOfHeaders;
+      }
       return reinterpret_cast<T*>(cached.noCleanupPtr ? cached.noCleanupPtr : cached.objPtr.get());
     }
     ptr = mCCDBAccessor.retrieveFromTFileAny<T>(path, mMetaData, timestamp, &mHeaders, cached.uuid,
                                                 mCreatedNotAfter ? std::to_string(mCreatedNotAfter) : "",
                                                 mCreatedNotBefore ? std::to_string(mCreatedNotBefore) : "");
+
+    // Cache the headers
+    if (headerFilter.empty()) {
+      // No filter, cache all headers
+      for (auto const& h : mHeaders) {
+        cached.cacheOfHeaders[h.first] = h.second;
+      }
+    } else {
+      // Cache only the asked for headers
+      for (auto const& k : headerFilter) {
+        auto it = mHeaders.find(std::string(k));
+        if (it != mHeaders.end()) {
+          cached.cacheOfHeaders.insert_or_assign(it->first, it->second); // Only want to overwrite if the header exists in the source
+        }
+      }
+    }
+    if (headers) {
+      *headers = cached.cacheOfHeaders;
+    }
+
     if (ptr) { // new object was shipped, old one (if any) is not valid anymore
       cached.fetches++;
       mFetches++;
@@ -300,7 +331,7 @@ T* CCDBManagerInstance::getForTimeStamp(std::string const& path, long timestamp)
         size_t s = atol(sh->second.c_str());
         mFetchedSize += s;
         cached.minSize = std::min(s, cached.minSize);
-        cached.maxSize = std::max(s, cached.minSize);
+        cached.maxSize = std::max(s, cached.minSize); // I think this should be maxSize, not minSize
       }
     } else if (mHeaders.count("Error")) { // in case of errors the pointer is 0 and headers["Error"] should be set
       cached.failures++;
