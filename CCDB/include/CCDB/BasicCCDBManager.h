@@ -98,9 +98,9 @@ class CCDBManagerInstance
   /// query timestamp
   long getTimestamp() const { return mTimestamp; }
 
-  /// retrieve an object of type T from CCDB as stored under path and timestamp
+  /// retrieve an object of type T from CCDB as stored under path and timestamp. Optional to get the headers
   template <typename T>
-  T* getForTimeStamp(std::string const& path, long timestamp);
+  T* getForTimeStamp(std::string const& path, long timestamp, std::map<std::string, std::string>* headers = nullptr);
 
   /// retrieve an object of type T from CCDB as stored under path and using the timestamp in the middle of the run
   template <typename T>
@@ -235,7 +235,7 @@ class CCDBManagerInstance
 };
 
 template <typename T>
-T* CCDBManagerInstance::getForTimeStamp(std::string const& path, long timestamp)
+T* CCDBManagerInstance::getForTimeStamp(std::string const& path, long timestamp, std::map<std::string, std::string>* headers)
 {
   mHeaders.clear(); // we clear at the beginning; to allow to retrieve the header information in a subsequent call
   T* ptr = nullptr;
@@ -262,6 +262,9 @@ T* CCDBManagerInstance::getForTimeStamp(std::string const& path, long timestamp)
     auto& cached = mCache[path];
     cached.queries++;
     if ((!isOnline() && cached.isCacheValid(timestamp)) || (mCheckObjValidityEnabled && cached.isValid(timestamp))) {
+      if (headers) {
+        *headers = mHeaders;
+      }
       return reinterpret_cast<T*>(cached.noCleanupPtr ? cached.noCleanupPtr : cached.objPtr.get());
     }
     ptr = mCCDBAccessor.retrieveFromTFileAny<T>(path, mMetaData, timestamp, &mHeaders, cached.uuid,
@@ -320,6 +323,9 @@ T* CCDBManagerInstance::getForTimeStamp(std::string const& path, long timestamp)
       }
       mFailures++;
     }
+  }
+  if (headers) {
+    *headers = mHeaders; // Do a deep copy of the headers
   }
   auto end = std::chrono::system_clock::now();
   mTimerMS += std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
