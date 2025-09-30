@@ -40,8 +40,9 @@ struct Fixture {
   Fixture()
   {
     o2::ccdb::CcdbApi api;
-    if (std::getenv("ALICEO2_CCDB_HOST"))
+    if (std::getenv("ALICEO2_CCDB_HOST")) {
       ccdbUrl = std::string(std::getenv("ALICEO2_CCDB_HOST"));
+    }
     api.init(ccdbUrl);
     hostReachable = api.isHostReachable();
     char hostname[_POSIX_HOST_NAME_MAX];
