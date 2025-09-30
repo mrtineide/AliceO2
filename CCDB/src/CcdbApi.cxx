@@ -880,7 +880,7 @@ bool CcdbApi::retrieveBlob(std::string const& path, std::string const& targetdir
 
   updateMetaInformationInLocalFile(targetpath.c_str(), &headers, &querysummary);
   if (outHeaders) {
-    *outHeaders = std::move(headers); // Re-use the same headers to give back to the callee
+    *outHeaders = std::move(headers);
   }
   return true;
 }

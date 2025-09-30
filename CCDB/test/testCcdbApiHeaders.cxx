@@ -250,147 +250,179 @@ BOOST_AUTO_TEST_CASE(testNonCachedHeaders, *boost::unit_test::precondition(if_re
   BOOST_TEST(headers1 != headers2, "The headers for different objects should be different");
 }
 
-BOOST_AUTO_TEST_CASE(test_header_filtering, *boost::unit_test::precondition(if_reachable()))
+BOOST_AUTO_TEST_CASE(CacheFirstRetrievalAndHeadersPersistence)
 {
+  test_fixture f;
   /// ━━━━━━━ ARRANGE ━━━━━━━━━
-  // First store objects to test with
+  // Prepare two validity slots for same path to test ETag change later
+  std::string path = basePath + "ObjA";
+  std::string objV1 = "ObjectVersion1";
+  std::string objV2 = "ObjectVersion2";
+  std::map<std::string, std::string> meta1{
+    {"UserKey1", "UValue1"},
+    {"UserKey2", "UValue2"}};
+  long v1start = 10'000;
+  long v1stop = 20'000;
+  long v2start = v1stop; // contiguous slot
+  long v2stop = v2start + (v1stop - v1start);
+  long mid1 = (v1start + v1stop) / 2;
+  // Store 2 versions
+  f.api.storeAsTFileAny(&objV1, path, meta1, v1start, v1stop);
+  f.api.storeAsTFileAny(&objV2, path, meta1, v2start, v2stop);
+
+  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
+  mgr.setURL(ccdbUrl);
+  mgr.clearCache();
+  mgr.setCaching(true);
+  mgr.setFatalWhenNull(true);
+  mgr.setTimestamp(mid1);
+
+  /// ━━━━━━━ACT━━━━━━━━━
+  std::map<std::string, std::string> headers1, headers2, headers4, headers5;
+
+  // 1) First retrieval WITH headers inside 1st slot
+  auto* p1 = mgr.getForTimeStamp<std::string>(path, mid1, &headers1);
+  size_t fetchedSizeAfterFirst = mgr.getFetchedSize();
+  // 2) Second retrieval (cache hit)
+  auto* p2 = mgr.getForTimeStamp<std::string>(path, mid1, &headers2);
+  size_t fetchedSizeAfterSecond = mgr.getFetchedSize();
+  // 3) Third retrieval (cache hit) WITHOUT passing headers
+  auto* p3 = mgr.getForTimeStamp<std::string>(path, mid1);
+  // 4) Fourth retrieval with headers again -> should still produce same headers
+  auto* p4 = mgr.getForTimeStamp<std::string>(path, mid1, &headers4);
+  // 5) Fifth retrieval with headers again to check persistence
+  auto* p5 = mgr.getForTimeStamp<std::string>(path, mid1, &headers5);
+
+  /// ━━━━━━━ASSERT━━━━━━━━━
+
+  BOOST_TEST(p1 != nullptr);
+  BOOST_TEST(*p1 == objV1);
+
+  BOOST_TEST(headers1.count("UserKey1") == 1);
+  BOOST_TEST(headers1.count("UserKey2") == 1);
+  BOOST_TEST(headers1["UserKey1"] == "UValue1");
+  BOOST_TEST(headers1["UserKey2"] == "UValue2");
+  BOOST_TEST(headers1.count("Valid-From") == 1);
+  BOOST_TEST(headers1.count("Valid-Until") == 1);
+  BOOST_TEST(headers1.count("ETag") == 1);
+
+  /*  Need to manually amend the headers1 to have cache valid until for comparison sake,
+   *  the header is not set in the first request.
+   *  It is only set if the internal cache of CCDB has seen this object before, apperently.
+   *  This will never happen in this test since it was just created and not asked for before.
+   */
+  headers1["Cache-Valid-Until"] = std::to_string(v1stop);
+
+  /* In rare cases the header date might be different, if the second has ticked over between the requests
+   */
+  headers1.erase("Date");
+  headers2.erase("Date");
+  headers4.erase("Date");
+  headers5.erase("Date");
+
+  BOOST_TEST(p2 == p1);                                        // same pointer for cached scenario
+  BOOST_TEST(headers2 == headers1);                            // identical header map
+  BOOST_TEST(fetchedSizeAfterSecond == fetchedSizeAfterFirst); // no new fetch
+
+  BOOST_TEST(p3 == p1);
+
+  BOOST_TEST(p4 == p1);
+  BOOST_TEST(headers4 == headers1);
+
+  // Mutate the returned header map locally and ensure it does not corrupt internal cache
+  headers4["UserKey1"] = "Tampered";
+  BOOST_TEST(p5 == p1);
+  BOOST_TEST(headers5["UserKey1"] == "UValue1"); // internal unchanged
+}
+
+BOOST_AUTO_TEST_CASE(FailedFetchDoesNotGiveMetadata)
+{
   test_fixture f;
 
-  std::string pathA = basePath + "CachingA";
-  std::string pathB = basePath + "CachingB";
-  std::string ccdbObjO = "testObjectO";
-  std::string ccdbObjN = "testObjectN";
-  std::map<std::string, std::string> md = f.metadata;
-  long start = 1000, stop = 3000;
-  f.api.storeAsTFileAny<std::string>(&ccdbObjO, pathA, md, start, stop);
-  f.api.storeAsTFileAny<std::string>(&ccdbObjN, pathB, md, start + 1, stop + 1);
-  // initilize the BasicCCDBManager
-  o2::ccdb::BasicCCDBManager& ccdbManager = o2::ccdb::BasicCCDBManager::instance();
-  ccdbManager.clearCache();
-  ccdbManager.setURL(ccdbUrl);
-  ccdbManager.setCaching(true); // This is what we want to test.
+  /// ━━━━━━━ ARRANGE ━━━━━━━━━
+  std::string path = basePath + "FailThenRecover";
+  std::string content = "ContentX";
+  std::map<std::string, std::string> meta{{"Alpha", "Beta"}};
+  long s = 300'000, e = 310'000;
+  f.api.storeAsTFileAny(&content, path, meta, s, e);
+  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
+  mgr.clearCache();
+  mgr.setCaching(true);
+  mgr.setFatalWhenNull(false);
 
-  // ━━━━━━━━━━━━ ACT ━━━━━━━━━━━━
-  // Plan: get the objects but also include a string view to indicate which headers to keep
+  /// ━━━━━━━ ACT ━━━━━━━━━
+  // Intentionally pick a timestamp outside validity to fail first
+  long badTS = s - 1000;
+  long goodTS = (s + e) / 2;
+  std::map<std::string, std::string> hFail, hGood;
+  auto* badObj = mgr.getForTimeStamp<std::string>(path, badTS, &hFail);
+  auto* goodObj = mgr.getForTimeStamp<std::string>(path, goodTS, &hGood);
 
-  // Convert the stable keys to a vector of string views
-  std::vector<std::string_view> headerFilter;
-  for (const auto& k : sStableKeys) {
-    headerFilter.push_back(k);
+  /// ━━━━━━━ ASSERT ━━━━━━━━━
+  BOOST_TEST(!hFail.empty());           // Should have some headers
+  BOOST_TEST(hFail["Alpha"] != "Beta"); // But not the metadata
+  BOOST_TEST(hGood.count("Alpha") == 1);
+  BOOST_TEST(hGood["Alpha"] == "Beta");
+
+  mgr.setFatalWhenNull(true);
+}
+
+BOOST_AUTO_TEST_CASE(FirstCallWithoutHeadersThenWithHeaders)
+{
+  test_fixture f;
+
+  std::string path = basePath + "LateHeaders";
+  std::string body = "Late";
+  std::map<std::string, std::string> meta{{"LateKey", "LateVal"}};
+  long s = 400'000, e = 410'000;
+  f.api.storeAsTFileAny(&body, path, meta, s, e);
+
+  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
+  mgr.clearCache();
+  mgr.setCaching(true);
+  long ts = (s + e) / 2;
+
+  // 1) First call with nullptr headers
+  auto* first = mgr.getForTimeStamp<std::string>(path, ts);
+  BOOST_TEST(first != nullptr);
+  BOOST_TEST(*first == body);
+
+  // 2) Second call asking for headers - should return the full set
+  std::map<std::string, std::string> h2;
+  auto* second = mgr.getForTimeStamp<std::string>(path, ts, &h2);
+  BOOST_TEST(second == first);
+  BOOST_TEST(h2.count("LateKey") == 1);
+  BOOST_TEST(h2["LateKey"] == "LateVal");
+  BOOST_TEST(h2.count("Valid-From") == 1);
+  BOOST_TEST(h2.count("Valid-Until") == 1);
+}
+
+BOOST_AUTO_TEST_CASE(HeadersAreStableAcrossMultipleHits)
+{
+  test_fixture f;
+
+  std::string path = basePath + "StableHeaders";
+  std::string body = "Stable";
+  std::map<std::string, std::string> meta{{"HK", "HV"}};
+  long s = 500'000, e = 510'000;
+  f.api.storeAsTFileAny(&body, path, meta, s, e);
+
+  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
+  mgr.clearCache();
+  mgr.setCaching(true);
+  long ts = (s + e) / 2;
+
+  std::map<std::string, std::string> h1;
+  auto* o1 = mgr.getForTimeStamp<std::string>(path, ts, &h1);
+  BOOST_TEST(o1 != nullptr);
+  BOOST_TEST(h1.count("HK") == 1);
+
+  std::string etag = h1["ETag"];
+  for (int i = 0; i < 15; ++i) {
+    std::map<std::string, std::string> hi;
+    auto* oi = mgr.getForTimeStamp<std::string>(path, ts, &hi);
+    BOOST_TEST(oi == o1);
+    BOOST_TEST(hi.count("HK") == 1);
+    BOOST_TEST(hi["ETag"] == etag);
   }
-
-  std::map<std::string, std::string> headers1, headers2, headers3;
-  auto* obj1 = ccdbManager.getForTimeStamp<std::string>(pathA, (start + stop) / 2, &headers1, headerFilter);
-  auto* obj2 = ccdbManager.getForTimeStamp<std::string>(pathB, (start + stop) / 2, &headers2, headerFilter);
-  auto* obj3 = ccdbManager.getForTimeStamp<std::string>(pathA, (start + stop) / 2, &headers3, headerFilter); // Should lead to a cache hit
-
-  /// ━━━━━━━━━━━ ASSERT ━━━━━━━━━━━
-
-  /// Check that we got something
-  BOOST_REQUIRE(obj1 != nullptr);
-  BOOST_REQUIRE(obj2 != nullptr);
-  BOOST_REQUIRE(obj3 != nullptr);
-
-  LOG(debug) << "obj1: " << *obj1;
-  LOG(debug) << "obj2: " << *obj2;
-  LOG(debug) << "obj3: " << *obj3;
-  /// Sanity check
-  // Check that the objects are correct
-  BOOST_TEST(*obj1 == ccdbObjO);
-  BOOST_TEST(*obj3 == ccdbObjO);
-  BOOST_TEST(obj3 == obj1); // should be the same object in memory since it is cached
-  BOOST_TEST(obj2 != obj1);
-
-  // Modify one and check that the other is also modified
-  (*obj1) = "ModifiedObject";
-  BOOST_TEST(*obj1 == "ModifiedObject");
-  BOOST_TEST(*obj3 == "ModifiedObject");
-
-  BOOST_REQUIRE(headers1.size() != 0);
-  BOOST_REQUIRE(headers3.size() != 0);
-
-  LOG(debug) << "Headers1 size: " << headers1.size();
-  for (const auto& h : headers1) {
-    LOG(debug) << "  " << h.first << " -> " << h.second;
-  }
-  LOG(debug) << "Headers3 size: " << headers3.size();
-  for (const auto& h : headers3) {
-    LOG(debug) << "  " << h.first << " -> " << h.second;
-  }
-
-  /// Test the headers keys and values are the same for the two retrievals of the same object
-  for (const auto& stableKey : sStableKeys) {
-    LOG(debug) << "Checking header: " << stableKey;
-
-    BOOST_TEST(headers1.count(stableKey) > 0, "stable key missing in headers1: " + stableKey);
-    BOOST_TEST(headers3.count(stableKey) > 0, "stable key missing in headers3: " + stableKey);
-
-    BOOST_TEST(headers1.at(stableKey) == headers3.at(stableKey));
-  }
-
-  // Now test that the filtering worked, i.e. that we only have the stable keys
-  for (const auto& h : headers1) {
-    BOOST_TEST(sStableKeys.count(h.first) > 0, "Found non-stable key in headers1: " + h.first);
-  }
-  for (const auto& h : headers2) {
-    BOOST_TEST(sStableKeys.count(h.first) > 0, "Found non-stable key in headers2: " + h.first);
-  }
-  for (const auto& h : headers3) {
-    BOOST_TEST(sStableKeys.count(h.first) > 0, "Found non-stable key in headers3: " + h.first);
-  }
-
-  // Now check that we just have the filtered keys
-  BOOST_TEST(headers1.size() == sStableKeys.size());
-  BOOST_TEST(headers3.size() == sStableKeys.size());
-
-  // Extract the keys and values so that we can compare the sets
-  std::set<std::string> header1Keys, header2Keys, header3Keys;
-  std::set<std::string> header1Values, header2Values;
-
-  for (const auto& h : headers1) {
-    header1Keys.insert(h.first);
-  }
-  for (const auto& h : headers2) {
-    header2Keys.insert(h.first);
-  }
-  for (const auto& h : headers3) {
-    header3Keys.insert(h.first);
-  }
-
-  BOOST_TEST(header1Keys.size() == sStableKeys.size());
-  BOOST_TEST(header2Keys.size() == sStableKeys.size());
-  BOOST_TEST(header3Keys.size() == sStableKeys.size());
-
-  BOOST_TEST(header1Keys == header2Keys, boost::test_tools::per_element());
-  BOOST_TEST(header2Keys == header3Keys, boost::test_tools::per_element());
-  BOOST_TEST(header1Keys == header3Keys, boost::test_tools::per_element());
-
-  BOOST_TEST(header1Keys == sStableKeys, boost::test_tools::per_element());
-  BOOST_TEST(header2Keys == sStableKeys, boost::test_tools::per_element());
-  BOOST_TEST(header3Keys == sStableKeys, boost::test_tools::per_element());
-
-  /// Make sure that headers for different objects are different
-  BOOST_TEST(headers1 != headers2, "The headers for different objects should be different (mainly ETag)");
-
-  // Make a set of keys that we know beforehand is the same for different objects
-  std::set<std::string> keysThatShouldBeDifferent = {
-    "Valid-From",
-    "Valid-Until",
-    "Created",
-    "ETag",
-    "Content-Disposition",
-    "Content-Location",
-    "path",
-    "Content-MD5",
-  };
-
-  for (const auto& stableKey : keysThatShouldBeDifferent) {
-    BOOST_TEST(headers2.count(stableKey) > 0, "stable key missing in headers2: " + stableKey);
-    header2Values.insert(headers2.at(stableKey));
-    header1Values.insert(headers1.at(stableKey));
-  }
-
-  BOOST_TEST(header2Values.size() == keysThatShouldBeDifferent.size());
-
-  BOOST_TEST(header2Values != header1Values, boost::test_tools::per_element());
 }
