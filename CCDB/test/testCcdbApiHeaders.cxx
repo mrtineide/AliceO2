@@ -47,7 +47,7 @@ struct Fixture {
     char hostname[_POSIX_HOST_NAME_MAX];
     gethostname(hostname, _POSIX_HOST_NAME_MAX);
     basePath = std::string("Users/m/meide/BasicCCDBManager/");
-  
+
     ccdbManager.setURL(ccdbUrl);
 
     LOG(info) << "Path we will use in this test suite : " + basePath << std::endl;
