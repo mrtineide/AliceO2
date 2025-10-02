@@ -39,15 +39,16 @@ bool hostReachable = false;
 struct Fixture {
   Fixture()
   {
-    o2::ccdb::CcdbApi api;
+    auto& ccdbManager = o2::ccdb::BasicCCDBManager::instance();
     if (std::getenv("ALICEO2_CCDB_HOST")) {
       ccdbUrl = std::string(std::getenv("ALICEO2_CCDB_HOST"));
     }
-    api.init(ccdbUrl);
-    hostReachable = api.isHostReachable();
+    hostReachable = ccdbManager.getCCDBAccessor().isHostReachable();
     char hostname[_POSIX_HOST_NAME_MAX];
     gethostname(hostname, _POSIX_HOST_NAME_MAX);
     basePath = std::string("Users/m/meide/BasicCCDBManager/");
+  
+    ccdbManager.setURL(ccdbUrl);
 
     LOG(info) << "Path we will use in this test suite : " + basePath << std::endl;
     LOG(info) << "ccdb url: " << ccdbUrl << std::endl;
@@ -56,9 +57,7 @@ struct Fixture {
   ~Fixture()
   {
     if (hostReachable) {
-      o2::ccdb::CcdbApi api;
-      api.init(ccdbUrl);
-      api.truncate(basePath + "*"); // This deletes the data after test is run, disable if you want to inspect the data
+      o2::ccdb::BasicCCDBManager::instance().getCCDBAccessor().truncate(basePath + "*"); // This deletes the data after test is run, disable if you want to inspect the data
       LOG(info) << "Test data truncated/deleted (" << basePath << ")" << std::endl;
     }
   }
@@ -73,22 +72,6 @@ struct if_reachable {
   {
     return hostReachable;
   }
-};
-/**
- * Fixture for the tests, i.e. code is ran in every test that uses it, i.e. it is like a setup and teardown for tests.
- * Copied from testCcdbApi.cxx
- */
-struct test_fixture {
-  test_fixture()
-  {
-    api.init(ccdbUrl);
-    metadata["Hello"] = "World";
-    LOG(info) << "*** " << boost::unit_test::framework::current_test_case().p_name << " ***" << std::endl;
-  }
-  ~test_fixture() = default;
-
-  o2::ccdb::CcdbApi api;
-  std::map<std::string, std::string> metadata;
 };
 
 // Only compare known and stable keys (avoid volatile ones like Date)
@@ -112,23 +95,24 @@ BOOST_AUTO_TEST_CASE(testCachedHeaders, *boost::unit_test::precondition(if_reach
 {
   /// ━━━━━━━ ARRANGE ━━━━━━━━━
   // First store objects to test with
-  test_fixture f;
-
+  auto& ccdbManager = o2::ccdb::BasicCCDBManager::instance();
   std::string pathA = basePath + "CachingA";
   std::string pathB = basePath + "CachingB";
   std::string pathC = basePath + "CachingC";
   std::string ccdbObjO = "testObjectO";
   std::string ccdbObjN = "testObjectN";
   std::string ccdbObjX = "testObjectX";
-  std::map<std::string, std::string> md = f.metadata;
+  std::map<std::string, std::string> md = {
+    {"Hello", "World"},
+    {"Key1", "Value1"},
+    {"Key2", "Value2"},
+  };
   long start = 1000, stop = 3000;
-  f.api.storeAsTFileAny<std::string>(&ccdbObjO, pathA, md, start, stop);
-  f.api.storeAsTFileAny<std::string>(&ccdbObjN, pathB, md, start, stop);
-  f.api.storeAsTFileAny<std::string>(&ccdbObjX, pathC, md, start, stop);
+  ccdbManager.getCCDBAccessor().storeAsTFileAny<std::string>(&ccdbObjO, pathA, md, start, stop);
+  ccdbManager.getCCDBAccessor().storeAsTFileAny<std::string>(&ccdbObjN, pathB, md, start, stop);
+  ccdbManager.getCCDBAccessor().storeAsTFileAny<std::string>(&ccdbObjX, pathC, md, start, stop);
   // initilize the BasicCCDBManager
-  o2::ccdb::BasicCCDBManager& ccdbManager = o2::ccdb::BasicCCDBManager::instance();
   ccdbManager.clearCache();
-  ccdbManager.setURL(ccdbUrl);
   ccdbManager.setCaching(true); // This is what we want to test.
 
   /// ━━━━━━━━━━━ ACT ━━━━━━━━━━━━
@@ -193,20 +177,21 @@ BOOST_AUTO_TEST_CASE(testNonCachedHeaders, *boost::unit_test::precondition(if_re
 {
   /// ━━━━━━━ ARRANGE ━━━━━━━━━
   // First store objects to test with
-  test_fixture f;
-
+  o2::ccdb::BasicCCDBManager& ccdbManager = o2::ccdb::BasicCCDBManager::instance();
   std::string pathA = basePath + "NonCachingA";
   std::string pathB = basePath + "NonCachingB";
   std::string ccdbObjO = "testObjectO";
   std::string ccdbObjN = "testObjectN";
-  std::map<std::string, std::string> md = f.metadata;
+  std::map<std::string, std::string> md = {
+    {"Hello", "World"},
+    {"Key1", "Value1"},
+    {"Key2", "Value2"},
+  };
   long start = 1000, stop = 2000;
-  f.api.storeAsTFileAny(&ccdbObjO, pathA, md, start, stop);
-  f.api.storeAsTFileAny(&ccdbObjN, pathB, md, start, stop);
+  ccdbManager.getCCDBAccessor().storeAsTFileAny(&ccdbObjO, pathA, md, start, stop);
+  ccdbManager.getCCDBAccessor().storeAsTFileAny(&ccdbObjN, pathB, md, start, stop);
   // initilize the BasicCCDBManager
-  o2::ccdb::BasicCCDBManager& ccdbManager = o2::ccdb::BasicCCDBManager::instance();
   ccdbManager.clearCache();
-  ccdbManager.setURL(ccdbUrl);
   ccdbManager.setCaching(false); // This is what we want to test, no caching
 
   /// ━━━━━━━━━━━ ACT ━━━━━━━━━━━━
@@ -253,8 +238,8 @@ BOOST_AUTO_TEST_CASE(testNonCachedHeaders, *boost::unit_test::precondition(if_re
 
 BOOST_AUTO_TEST_CASE(CacheFirstRetrievalAndHeadersPersistence)
 {
-  test_fixture f;
   /// ━━━━━━━ ARRANGE ━━━━━━━━━
+  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
   // Prepare two validity slots for same path to test ETag change later
   std::string path = basePath + "ObjA";
   std::string objV1 = "ObjectVersion1";
@@ -268,11 +253,9 @@ BOOST_AUTO_TEST_CASE(CacheFirstRetrievalAndHeadersPersistence)
   long v2stop = v2start + (v1stop - v1start);
   long mid1 = (v1start + v1stop) / 2;
   // Store 2 versions
-  f.api.storeAsTFileAny(&objV1, path, meta1, v1start, v1stop);
-  f.api.storeAsTFileAny(&objV2, path, meta1, v2start, v2stop);
+  mgr.getCCDBAccessor().storeAsTFileAny(&objV1, path, meta1, v1start, v1stop);
+  mgr.getCCDBAccessor().storeAsTFileAny(&objV2, path, meta1, v2start, v2stop);
 
-  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
-  mgr.setURL(ccdbUrl);
   mgr.clearCache();
   mgr.setCaching(true);
   mgr.setFatalWhenNull(true);
@@ -338,15 +321,14 @@ BOOST_AUTO_TEST_CASE(CacheFirstRetrievalAndHeadersPersistence)
 
 BOOST_AUTO_TEST_CASE(FailedFetchDoesNotGiveMetadata)
 {
-  test_fixture f;
 
   /// ━━━━━━━ ARRANGE ━━━━━━━━━
+  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
   std::string path = basePath + "FailThenRecover";
   std::string content = "ContentX";
   std::map<std::string, std::string> meta{{"Alpha", "Beta"}};
   long s = 300'000, e = 310'000;
-  f.api.storeAsTFileAny(&content, path, meta, s, e);
-  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
+  mgr.getCCDBAccessor().storeAsTFileAny(&content, path, meta, s, e);
   mgr.clearCache();
   mgr.setCaching(true);
   mgr.setFatalWhenNull(false);
@@ -370,15 +352,14 @@ BOOST_AUTO_TEST_CASE(FailedFetchDoesNotGiveMetadata)
 
 BOOST_AUTO_TEST_CASE(FirstCallWithoutHeadersThenWithHeaders)
 {
-  test_fixture f;
 
+  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
   std::string path = basePath + "LateHeaders";
   std::string body = "Late";
   std::map<std::string, std::string> meta{{"LateKey", "LateVal"}};
   long s = 400'000, e = 410'000;
-  f.api.storeAsTFileAny(&body, path, meta, s, e);
+  mgr.getCCDBAccessor().storeAsTFileAny(&body, path, meta, s, e);
 
-  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
   mgr.clearCache();
   mgr.setCaching(true);
   long ts = (s + e) / 2;
@@ -400,15 +381,14 @@ BOOST_AUTO_TEST_CASE(FirstCallWithoutHeadersThenWithHeaders)
 
 BOOST_AUTO_TEST_CASE(HeadersAreStableAcrossMultipleHits)
 {
-  test_fixture f;
 
+  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
   std::string path = basePath + "StableHeaders";
   std::string body = "Stable";
   std::map<std::string, std::string> meta{{"HK", "HV"}};
   long s = 500'000, e = 510'000;
-  f.api.storeAsTFileAny(&body, path, meta, s, e);
+  mgr.getCCDBAccessor().storeAsTFileAny(&body, path, meta, s, e);
 
-  auto& mgr = o2::ccdb::BasicCCDBManager::instance();
   mgr.clearCache();
   mgr.setCaching(true);
   long ts = (s + e) / 2;
