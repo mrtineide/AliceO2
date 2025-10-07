@@ -46,7 +46,7 @@ struct Fixture {
     hostReachable = ccdbManager.getCCDBAccessor().isHostReachable();
     char hostname[_POSIX_HOST_NAME_MAX];
     gethostname(hostname, _POSIX_HOST_NAME_MAX);
-    basePath = std::string("Users/m/meide/Tests/") + hostname+"/pid-" +getpid()+ "/BasicCCDBManager/";
+    basePath = std::string("Users/m/meide/Tests/") + hostname + "/pid-" + getpid() + "/BasicCCDBManager/";
 
     ccdbManager.setURL(ccdbUrl);
 
@@ -236,13 +236,13 @@ BOOST_AUTO_TEST_CASE(testNonCachedHeaders, *boost::unit_test::precondition(if_re
   BOOST_TEST(headers2.size() != 0);
   BOOST_TEST(headers1 != headers2, "The headers for different objects should be different");
 
-  //cleanup 
+  // cleanup
   delete obj1;
   delete obj2;
   delete obj3;
 }
 
-BOOST_AUTO_TEST_CASE(CacheFirstRetrievalAndHeadersPersistence,*boost::unit_test::precondition(if_reachable()))
+BOOST_AUTO_TEST_CASE(CacheFirstRetrievalAndHeadersPersistence, *boost::unit_test::precondition(if_reachable()))
 {
   /// ━━━━━━━ ARRANGE ━━━━━━━━━
   auto& mgr = o2::ccdb::BasicCCDBManager::instance();
@@ -327,7 +327,7 @@ BOOST_AUTO_TEST_CASE(CacheFirstRetrievalAndHeadersPersistence,*boost::unit_test:
   BOOST_TEST(headers5["UserKey1"] == "UValue1"); // internal unchanged
 }
 
-BOOST_AUTO_TEST_CASE(FailedFetchDoesNotGiveMetadata,*boost::unit_test::precondition(if_reachable()))
+BOOST_AUTO_TEST_CASE(FailedFetchDoesNotGiveMetadata, *boost::unit_test::precondition(if_reachable()))
 {
 
   /// ━━━━━━━ ARRANGE ━━━━━━━━━
